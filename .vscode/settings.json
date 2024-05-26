@@ -1,0 +1,5 @@
+{
+  "tabnine.disableFileRegex": [
+    "[.]env$"
+  ]
+}
