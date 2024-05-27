@@ -1,1 +1,1 @@
-# 240526 lnnblog-sync
+# lnnblog-sync

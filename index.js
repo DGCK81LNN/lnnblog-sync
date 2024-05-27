@@ -67,6 +67,46 @@ async function api(url, opt, test) {
   return data
 }
 
+/**
+ * @template [A=any]
+ * @template {{ query?: A, continue?: unknown }} [T={ query?: A, continue?: { continue: string } }]
+ * @template [R=import("axios").AxiosResponse<T>]
+ * @template [D=any]
+ * @param {string} url
+ * @param {import("axios").AxiosRequestConfig<D>} opt
+ * @returns {Promise<A>}
+ */
+async function apiQueryAll(url, opt) {
+  /** @type {T} */
+  let data
+  /** @type {A} */
+  let results
+  do {
+    data = await api(url, {
+      ...opt,
+      params: {
+        ...opt.params,
+        ...data?.continue,
+      },
+    })
+    if (!data.query) break
+    if (!results) {
+      results = data.query
+    } else {
+      for (const [key, value] of Object.entries(data.query)) {
+        const currValue = results[key]
+        if (Array.isArray(currValue)) currValue.push(...value)
+        else results[key] = value
+      }
+    }
+  } while (typeof data.continue?.continue === "string")
+
+  return {
+    ...data,
+    query: results,
+  }
+}
+
 if (sourceUsername && sourcePassword) {
   console.log("Fetch login token for source site...")
   const {
@@ -103,28 +143,16 @@ if (sourceUsername && sourcePassword) {
   console.log("Credentials not specified, skip logging in to source site")
 }
 
-const changes = []
-{
-  let continueParams = null
-  do {
-    const {
-      continue: cont,
-      query: { recentchanges: list },
-    } = await api(sourceApiPhp, {
-      params: {
-        action: "query",
-        list: "recentchanges",
-        rcstart: lastSync,
-        rcdir: "newer",
-        rclimit: "50",
-        rcnamespace: "0|6|8|10|14|828",
-        rcprop: "title|timestamp|ids",
-        rctype: "edit|new|log|categorize",
-        ...continueParams,
-      },
-    })
-    changes.push(...list)
-    continueParams = cont
-  } while (typeof continueParams?.continue === "string")
-}
+const { recentchanges: changes } = await apiQueryAll(sourceApiPhp, {
+  params: {
+    action: "query",
+    list: "recentchanges",
+    rcstart: lastSync,
+    rcdir: "newer",
+    rclimit: "100",
+    rcnamespace: "0|6|8|10|14|828",
+    rcprop: "title|timestamp|ids|loginfo|redirect",
+    rctype: "edit|new|log|categorize",
+  },
+})
 console.log(changes)
