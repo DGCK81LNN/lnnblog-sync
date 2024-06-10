@@ -34,9 +34,6 @@ async function saveMock(x) {
   await writeFile("~mockfile.json", JSON.stringify(mock, null, 2))
   return x
 }
-function rejectSaveMock(x) {
-  return saveMock(Promise.reject(x))
-}
 
 class APIError extends Error {
   name = "APIError"
@@ -115,29 +112,33 @@ async function api(url, opt, assertion) {
   )
   if (typeof opt?._mock === "string" && Object.hasOwn(mock, opt._mock))
     return Promise.resolve(mock[opt._mock])
-  /** @type {R} */
-  const resp = await ax(url, {
-    ...opt,
-    params: {
-      format: "json",
-      formatversion: 2,
-      errorformat: "plaintext",
-      errorlang: "content",
-      ...opt.params,
-    },
-  }) //.catch(rejectSaveMock)
-  const data = resp.data
-  if (typeof data === "object") {
-    if (data.errors?.length) throw new APIError("API call errored", data)
-    if (data.warnings?.length) {
-      process.emitWarning("API call returned one or more warnings")
-      console.warn(data.warnings)
+  try {
+    /** @type {R} */
+    const resp = await ax(url, {
+      ...opt,
+      params: {
+        format: "json",
+        formatversion: 2,
+        errorformat: "plaintext",
+        errorlang: "content",
+        ...opt.params,
+      },
+    })
+    const data = resp.data
+    if (typeof data === "object") {
+      if (data.errors?.length) throw new APIError("API call errored", data)
+      if (data.warnings?.length) {
+        process.emitWarning("API call returned one or more warnings")
+        console.warn(data.warnings)
+      }
     }
+    if (assertion && !assertion(data))
+      throw new APIError("API action failed", data)
+    if (opt?._mock) mock[opt._mock] = data
+    return data
+  } finally {
+    if (saveMockFlag) await saveMock()
   }
-  if (assertion && !assertion(data))
-    throw new APIError("API action failed", data)
-  if (opt?._mock) mock[opt._mock] = data
-  return data
 }
 
 /**
@@ -212,14 +213,26 @@ async function apiLogin(url, username, password, _mock) {
       params: {
         action: "login",
       },
-      data: {
-        lgname: username,
-        lgpassword: password,
-        lgtoken: logintoken,
-        [inspect.custom]() {
-          return { ...this, lgpassword: "***" }
+      data: Object.defineProperty(
+        {
+          lgname: username,
+          lgpassword: password,
+          lgtoken: logintoken,
         },
-      },
+        inspect.custom,
+        {
+          value: function () {
+            return {
+              ...this,
+              lgpassword: {
+                [inspect.custom](_, opt) {
+                  return opt.stylize("[***]", "special")
+                },
+              },
+            }
+          },
+        }
+      ),
     },
     d => d.login.result === "Success"
   )
@@ -270,7 +283,7 @@ const {
     rctype: "edit|new|log",
     curtimestamp: "1",
   },
-}).then(saveMock, rejectSaveMock)
+})
 
 /** @type {Map<string, { oldTitle?: string, minor: boolean }>} */
 const pages = new Map()
@@ -298,7 +311,8 @@ for (const {
       if (logparams.suppressredirect) pages.delete(title)
       else pages.set(title, { minor: false })
     } else if (logtype === "upload") {
-      fileIds.set(title, pageid)
+      // Disabling this as file download does not seem to be available to bot logins on private wikis
+      //fileIds.set(title, pageid)
     }
   }
 }
@@ -323,6 +337,7 @@ for (const [title] of fileIds) {
 console.log("\n============== TO-DO LIST ==============\n")
 if (!pages.size && !fileIds.size) {
   console.log("Nothing to do today, bye")
+  await writeFile("~lastsync", syncTime)
   process.exit(0)
 }
 
@@ -330,11 +345,11 @@ if (!pages.size && !fileIds.size) {
 const moves = Array.from(pages)
   .filter(([title, { oldTitle }]) => oldTitle && title !== oldTitle)
   .map(([title, { oldTitle }]) => [oldTitle, title])
-if (moves.length) console.log("- move", moves)
+if (moves.length) console.log("move", moves)
 
-if (pages.size) console.log("- import", [...pages.keys()])
+if (pages.size) console.log("import", [...pages.keys()])
 
-if (fileIds.size) console.log("- upload", [...fileIds.keys()])
+if (fileIds.size) console.log("upload", [...fileIds.keys()])
 
 console.log("\n========================================\n")
 
@@ -351,10 +366,11 @@ if (pages.size) {
       export: "1",
     },
   }))
+  // un-minor-ify revisions of pages that we know have recent non-minor revisions
   xmlExport = xmlExport.replace(
     /<title>\s*(.*?)\s*<\/title>.*?<\/revision>/gs,
     (str, title) => {
-      if (pages[title]?.minor === false)
+      if (pages.get(title)?.minor === false)
         str = str.replace(/\s*<minor\s*\/>/, "")
       return str
     }
@@ -375,7 +391,7 @@ if (fileIds.size) {
       iiprop: "url",
       pageids: [...fileIds.values()].join("|"),
     },
-  }).then(saveMock, rejectSaveMock)
+  })
   for (const {
     title,
     imageinfo: [{ url }],
@@ -429,24 +445,26 @@ if (moves.length) {
 
 if (xmlExport) {
   console.log("Import page revisions...")
-  await api(targetApiPhp, {
-    _mock: "",
-    method: "post",
-    params: {
-      action: "import",
-    },
-    data: {
-      xml: xmlExport,
-      interwikiprefix: "miraheze",
-      assignknownusers: "1",
-      summary: "从分支站同步更改",
-      tags: "syncbot",
-      token: csrftoken,
-    },
-  })
+  const data = new FormData()
+  data.append("xml", new File([xmlExport], "export.xml"))
+  data.append("interwikiprefix", "1")
+  data.append("assignknownusers", "1")
+  data.append("summary", "从分支站同步更改")
+  data.append("tags", "syncbot")
+  data.append("token", csrftoken)
+  console.log(
+    await api(targetApiPhp, {
+      _mock: "",
+      method: "post",
+      params: {
+        action: "import",
+      },
+      data,
+    })
+  )
 }
 
-if (fileUrls.size) {
+/*if (fileUrls.size) {
   console.log("Transfer files...")
   for (const [title, url] of fileUrls) {
     console.log(`  ... ${title}`)
@@ -473,7 +491,7 @@ if (fileUrls.size) {
       )
       .catch(console.error)
   }
-}
+}*/
 
 "REPL" in process.env &&
   Object.assign((await import("repl")).start().context, {
@@ -489,7 +507,6 @@ if (fileUrls.size) {
     mock,
     moves,
     pages,
-    rejectSaveMock,
     saveMock,
     sourceApiPhp,
     sourcePassword,

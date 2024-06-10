@@ -1,0 +1,48 @@
+name: Run syncbot
+
+on:
+  schedule:
+  - cron: "0 20 * * *"
+  workflow_dispatch:
+
+jobs:
+  pages:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out
+      uses: actions/checkout@v4
+    - name: Enable Corepack
+      run: corepack enable
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: yarn
+    - name: Install dependencies with Yarn
+      run: yarn install --immutable
+    - name: Run
+      run: node index.js
+      env:
+        SOURCE_APIPHP: ${{ vars.SOURCE_APIPHP }}
+        SOURCE_USERNAME: ${{ vars.SOURCE_USERNAME }}
+        SOURCE_PASSWORD: ${{ secrets.SOURCE_PASSWORD }}
+        TARGET_APIPHP: ${{ vars.TARGET_APIPHP }}
+        TARGET_USERNAME: ${{ vars.TARGET_USERNAME }}
+        TARGET_PASSWORD: ${{ secrets.TARGET_PASSWORD }}
+        LAST_SYNC: ${{ vars.LAST_SYNC }}
+    - name: Generate GitHub access token
+      id: generate-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ vars.GH_APP_ID }}
+        private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+    - name: Update LAST_SYNC
+      run: >
+        gh api
+        --method PATCH
+        -H "Accept: application/vnd.github+json"
+        -H "X-GitHub-Api-Version: 2022-11-28"
+        /repos/${{ github.repository }}/actions/variables/LAST_SYNC
+        -f "value="`cat '~lastsync'`
+      env:
+        GH_TOKEN: ${{ steps.generate-token.outputs.token }}
