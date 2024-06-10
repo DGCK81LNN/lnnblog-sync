@@ -1,52 +1,120 @@
-import axios from "axios"
-import { wrapper as cookieJarWrapper } from "axios-cookiejar-support"
 import "dotenv/config"
-import repl from "repl"
+
+import axios, { AxiosError } from "axios"
+import { createCookieAgent } from "http-cookie-agent/http"
+import { ProxyAgent } from "proxy-agent"
 import { CookieJar } from "tough-cookie"
 
-const sourceIndexPhp = process.env["SOURCE_INDEXPHP"]
+import { readFile, writeFile } from "fs/promises"
+import { inspect } from "util"
+
 const sourceApiPhp = process.env["SOURCE_APIPHP"]
 const sourceUsername = process.env["SOURCE_USERNAME"]
 const sourcePassword = process.env["SOURCE_PASSWORD"]
 const targetApiPhp = process.env["TARGET_APIPHP"]
 const targetUsername = process.env["TARGET_USERNAME"]
 const targetPassword = process.env["TARGET_PASSWORD"]
-const lastSync = process.env["LAST_SYNC"]
+const lastSync =
+  process.env["LAST_SYNC"] || (await readFile("~lastsync", "utf8")).trim()
+const mockLogin = "MOCK_LOGIN" in process.env
+const saveMockFlag = "SAVE_MOCK" in process.env
 
-if (!sourceIndexPhp) throw new Error("SOURCE_INDEXPHP not specified")
 if (!sourceApiPhp) throw new Error("SOURCE_APIPHP not specified")
 if (!targetApiPhp) throw new Error("TARGET_APIPHP not specified")
 if (!targetUsername) throw new Error("TARGET_USERNAME not specified")
 if (!targetPassword) throw new Error("TARGET_PASSWORD not specified")
 if (!lastSync) throw new Error("LAST_SYNC not specified")
 
+/** @type {Record<string, *>} */
+const mock = await readFile("~mockfile.json", "utf8").then(
+  f => JSON.parse(f),
+  () => ({})
+)
+async function saveMock(x) {
+  await writeFile("~mockfile.json", JSON.stringify(mock, null, 2))
+  return x
+}
+function rejectSaveMock(x) {
+  return saveMock(Promise.reject(x))
+}
+
 class APIError extends Error {
   name = "APIError"
   constructor(message, data) {
-    Object.assign(this, data)
     super(message)
+    Object.assign(this, data)
   }
 }
 
-const jar = new CookieJar()
-const axi = axios.create({ jar })
-const ax = cookieJarWrapper(axi)
+const CookieProxyAgent = createCookieAgent(ProxyAgent)
 
-axi.defaults.headers.common["User-Agent"] =
-  "lnnblog-syncbot/0.1 (User:DGCK81LNN; lnn@vudrux.site) LNNBot/0"
-axi.defaults.headers.post["Content-Type"] = "multipart/form-data"
+const jar = new CookieJar()
+const agent = new CookieProxyAgent({ cookies: { jar } })
+const axi = axios.create({
+  proxy: false,
+  httpsAgent: agent,
+  httpAgent: agent,
+  headers: {
+    common: {
+      "User-Agent":
+        "lnnblog-syncbot/0.1 (User:DGCK81LNN; lnn@vudrux.site) LNNBot/0",
+    },
+    post: {
+      "Content-Type": "multipart/form-data",
+    },
+  },
+})
+
+/** @type {typeof axi} */
+const ax = new Proxy(axi, {
+  apply(axi, self, args) {
+    return axi.apply(axi, args).catch(exc => {
+      if (exc instanceof AxiosError) {
+        Object.defineProperties(exc, {
+          config: { enumerable: false },
+          request: { enumerable: false },
+        })
+        const { response } = exc
+        if (response)
+          for (const key of Object.keys(response)) {
+            if (!["status", "statusText", "headers", "data"].includes(key))
+              Object.defineProperty(response, key, { enumerable: false })
+          }
+      }
+      return Promise.reject(exc)
+    })
+  },
+})
 
 /**
+ * Set `opt._mock` to a non-empty string to cache the result;
+ * set to the empty string to mark the API call as a data-modifying action
+ * which can be dropped by adding `"": {}` in the mockfile.
+ *
  * @template [A=T]
  * @template [T=any]
  * @template [R=import("axios").AxiosResponse<T>]
  * @template [D=any]
  * @param {string} url
- * @param {import("axios").AxiosRequestConfig<D>} opt
+ * @param {import("axios").AxiosRequestConfig<D> & { _mock?: string }} opt
  * @param {((data: T) => T is A)?} assertion
  * @returns {Promise<A>}
  */
 async function api(url, opt, assertion) {
+  process.stdout.write(
+    (
+      "api call " +
+      inspect(
+        { url, ...opt },
+        {
+          colors: process.stdout.isTTY && process.stdout.hasColors(),
+          maxStringLength: "1000",
+        }
+      )
+    ).replace(/^/gm, "    ") + "\n"
+  )
+  if (typeof opt?._mock === "string" && Object.hasOwn(mock, opt._mock))
+    return Promise.resolve(mock[opt._mock])
   /** @type {R} */
   const resp = await ax(url, {
     ...opt,
@@ -57,7 +125,7 @@ async function api(url, opt, assertion) {
       errorlang: "content",
       ...opt.params,
     },
-  })
+  }) //.catch(rejectSaveMock)
   const data = resp.data
   if (typeof data === "object") {
     if (data.errors?.length) throw new APIError("API call errored", data)
@@ -68,6 +136,7 @@ async function api(url, opt, assertion) {
   }
   if (assertion && !assertion(data))
     throw new APIError("API action failed", data)
+  if (opt?._mock) mock[opt._mock] = data
   return data
 }
 
@@ -76,7 +145,7 @@ async function api(url, opt, assertion) {
  * @template {{ query?: A, continue?: unknown }} [T={ query?: A, continue?: { continue: string } }]
  * @template [D=any]
  * @param {string} url
- * @param {import("axios").AxiosRequestConfig<D>} opt
+ * @param {import("axios").AxiosRequestConfig<D> & { _mock?: string }} opt
  * @returns {Promise<A>}
  */
 async function apiQueryListAll(url, opt) {
@@ -108,19 +177,26 @@ async function apiQueryListAll(url, opt) {
   } while (typeof data.continue?.continue === "string")
   console.log("  ...end")
 
-  return {
-    ...data,
-    query: results,
-  }
+  data.query = results
+  if (opt?._mock) mock[opt._mock] = data
+  return data
 }
 
-async function apiLogin(url, username, password) {
+/**
+ * @param {string} url
+ * @param {string} username
+ * @param {string} password
+ * @param {boolean | ""} [_mock=]
+ */
+async function apiLogin(url, username, password, _mock) {
+  if (_mock === "" && "login" in mock) return mock["login"]
   console.log(`  ...fetch login token`)
   const {
     query: {
       tokens: { logintoken },
     },
   } = await api(url, {
+    _mock: _mock && "logintoken",
     params: {
       action: "query",
       meta: "tokens",
@@ -131,6 +207,7 @@ async function apiLogin(url, username, password) {
   return api(
     url,
     {
+      _mock: _mock && "login",
       method: "post",
       params: {
         action: "login",
@@ -139,6 +216,9 @@ async function apiLogin(url, username, password) {
         lgname: username,
         lgpassword: password,
         lgtoken: logintoken,
+        [inspect.custom]() {
+          return { ...this, lgpassword: "***" }
+        },
       },
     },
     d => d.login.result === "Success"
@@ -149,73 +229,166 @@ if (sourceUsername && sourcePassword) {
   console.log("Log in to source site...")
   const {
     login: { lgusername },
-  } = await apiLogin(sourceApiPhp, sourceUsername, sourcePassword)
+  } = await apiLogin(sourceApiPhp, sourceUsername, sourcePassword, mockLogin)
   console.log(`Logged in to source site as ${lgusername}`)
 } else {
   console.log("Credentials not specified, skip logging in to source site")
 }
 
 console.log("Fetch excluded page list...")
-const {
-  query: { categorymembers: excludedPages },
-} = await apiQueryListAll(sourceApiPhp, {
-  params: {
-    list: "categorymembers",
-    cmtitle: "Category:禁止自动同步",
-    cmprop: "title",
-    cmlimit: "100",
-  },
-})
+let excludedPages = new Set()
+{
+  const {
+    query: { categorymembers },
+  } = await apiQueryListAll(sourceApiPhp, {
+    _mock: "excludedpages",
+    params: {
+      list: "categorymembers",
+      cmtitle: "Category:禁止自动同步",
+      cmprop: "title",
+      cmlimit: "100",
+    },
+  })
+  for (const { title } of categorymembers) {
+    excludedPages.add(title)
+  }
+}
 
 console.log("Fetch logs...")
 const {
   query: { recentchanges: changes },
-  //curtimestamp: syncTimestamp,
+  curtimestamp: syncTime,
 } = await apiQueryListAll(sourceApiPhp, {
+  _mock: "recentchanges",
   params: {
     list: "recentchanges",
     rcstart: lastSync,
     rcdir: "newer",
     rclimit: "100",
     rcnamespace: "0|6|8|10|14|828",
-    rcprop: "title|ids|timestamp|loginfo",
+    rcprop: "title|ids|flags|timestamp|loginfo",
     rctype: "edit|new|log",
-    //curtimestamp: "1",
+    curtimestamp: "1",
   },
-})
+}).then(saveMock, rejectSaveMock)
 
-/** @type {Map<string, string>} */
-const titleMapping = new Map()
+/** @type {Map<string, { oldTitle?: string, minor: boolean }>} */
+const pages = new Map()
 /** @type {Map<string, number>} */
 const fileIds = new Map()
-for (const { type, title, pageid, logtype, logaction, logparams } of changes) {
-  if (type === "new") {
-    titleMapping.has(title) || titleMapping.set(title, "")
-  } else if (type === "edit") {
-    titleMapping.has(title) || titleMapping.set(title, title)
+for (const {
+  type,
+  title,
+  pageid,
+  minor,
+  logtype,
+  logaction,
+  logparams,
+} of changes) {
+  if (type === "new" || type === "edit") {
+    const info = pages.get(title)
+    if (info) info.minor &&= !!minor
+    else pages.set(title, { minor: !!minor })
   } else if (type === "log") {
     if (logtype === "delete" && logaction == "delete") {
-      titleMapping.delete(title)
+      pages.delete(title)
     } else if (logtype === "move") {
-      const oldTitle = titleMapping.get(title) ?? title
-      titleMapping.set(logparams.target_title, oldTitle)
-      if (logparams.suppressredirect) titleMapping.delete(title)
-      else titleMapping.set(title, "")
+      const info = pages.get(title) ?? { oldTitle: title, minor: true }
+      pages.set(logparams.target_title, info)
+      if (logparams.suppressredirect) pages.delete(title)
+      else pages.set(title, { minor: false })
     } else if (logtype === "upload") {
       fileIds.set(title, pageid)
     }
   }
 }
 
-const moves = Array.from(titleMapping).filter(
-  ([to, from]) => from && to !== from
-)
+console.log("Remove excluded titles from to-do list...")
+for (const [newTitle, { oldTitle }] of pages) {
+  if (
+    excludedPages.has(newTitle) ||
+    (oldTitle && excludedPages.has(oldTitle))
+  ) {
+    console.log(`  ...exclude ${newTitle}`)
+    pages.delete(newTitle)
+  }
+}
+for (const [title] of fileIds) {
+  if (excludedPages.has(title)) {
+    console.log(`  ...exclude upload ${title}`)
+    fileIds.delete(title)
+  }
+}
+
+console.log("\n============== TO-DO LIST ==============\n")
+if (!pages.size && !fileIds.size) {
+  console.log("Nothing to do today, bye")
+  process.exit(0)
+}
+
+/** @type {[from: string, to: string][]} */
+const moves = Array.from(pages)
+  .filter(([title, { oldTitle }]) => oldTitle && title !== oldTitle)
+  .map(([title, { oldTitle }]) => [oldTitle, title])
+if (moves.length) console.log("- move", moves)
+
+if (pages.size) console.log("- import", [...pages.keys()])
+
+if (fileIds.size) console.log("- upload", [...fileIds.keys()])
+
+console.log("\n========================================\n")
+
+let xmlExport = ""
+if (pages.size) {
+  console.log("Export page revisions...")
+  ;({
+    query: { export: xmlExport },
+  } = await api(sourceApiPhp, {
+    _mock: "export",
+    params: {
+      action: "query",
+      titles: [...pages.keys()].join("|"),
+      export: "1",
+    },
+  }))
+  xmlExport = xmlExport.replace(
+    /<title>\s*(.*?)\s*<\/title>.*?<\/revision>/gs,
+    (str, title) => {
+      if (pages[title]?.minor === false)
+        str = str.replace(/\s*<minor\s*\/>/, "")
+      return str
+    }
+  )
+}
+
+/** @type {Map<string, string>} */
+const fileUrls = new Map()
+if (fileIds.size) {
+  console.log("Fetch file urls...")
+  const {
+    query: { pages },
+  } = await api(sourceApiPhp, {
+    _mock: "fileurls",
+    params: {
+      action: "query",
+      prop: "imageinfo",
+      iiprop: "url",
+      pageids: [...fileIds.values()].join("|"),
+    },
+  }).then(saveMock, rejectSaveMock)
+  for (const {
+    title,
+    imageinfo: [{ url }],
+  } of pages) {
+    fileUrls.set(title, url)
+  }
+}
 
 {
   console.log("Log in to target site...")
   const {
     login: { lgusername },
-  } = await apiLogin(targetApiPhp, targetUsername, targetPassword)
+  } = await apiLogin(targetApiPhp, targetUsername, targetPassword, "" in mock)
   console.log(`Logged in to target site as ${lgusername}`)
 }
 
@@ -232,23 +405,103 @@ const {
   },
 })
 
-console.log("Move pages...")
+if (moves.length) {
+  console.log("Move pages...")
+  for (const [from, to] of moves) {
+    console.log(`  ... ${from} --> ${to}`)
+    await api(targetApiPhp, {
+      _mock: "",
+      method: "post",
+      params: {
+        action: "move",
+      },
+      data: {
+        from: from,
+        to: to,
+        reason: "从分支站同步更改",
+        noredirect: "true",
+        tags: "syncbot",
+        token: csrftoken,
+      },
+    }).catch(console.error)
+  }
+}
 
-Object.assign(repl.start().context, {
-  api,
-  apiLogin,
-  apiQueryListAll,
-  changes,
-  csrftoken,
-  excludedPages,
-  lastSync,
-  sourceApiPhp,
-  sourceIndexPhp,
-  sourcePassword,
-  sourceUsername,
-  targetApiPhp,
-  targetPassword,
-  targetUsername,
-  titleMapping,
-  fileIds,
-})
+if (xmlExport) {
+  console.log("Import page revisions...")
+  await api(targetApiPhp, {
+    _mock: "",
+    method: "post",
+    params: {
+      action: "import",
+    },
+    data: {
+      xml: xmlExport,
+      interwikiprefix: "miraheze",
+      assignknownusers: "1",
+      summary: "从分支站同步更改",
+      tags: "syncbot",
+      token: csrftoken,
+    },
+  })
+}
+
+if (fileUrls.size) {
+  console.log("Transfer files...")
+  for (const [title, url] of fileUrls) {
+    console.log(`  ... ${title}`)
+    await ax(url, {
+      _mock: "",
+      responseType: "stream",
+    })
+      .then(({ data }) =>
+        api(targetApiPhp, {
+          _mock: "",
+          method: "post",
+          params: {
+            action: "upload",
+          },
+          data: {
+            filename: title,
+            file: data,
+            comment: "从分支站同步更改",
+            ignorewarnings: "1",
+            tags: "syncbot",
+            token: csrftoken,
+          },
+        })
+      )
+      .catch(console.error)
+  }
+}
+
+"REPL" in process.env &&
+  Object.assign((await import("repl")).start().context, {
+    api,
+    apiLogin,
+    apiQueryListAll,
+    ax: axi,
+    changes,
+    csrftoken,
+    excludedPages,
+    fileIds,
+    lastSync,
+    mock,
+    moves,
+    pages,
+    rejectSaveMock,
+    saveMock,
+    sourceApiPhp,
+    sourcePassword,
+    sourceUsername,
+    syncTime,
+    targetApiPhp,
+    targetPassword,
+    targetUsername,
+    xmlExport,
+  })
+
+await Promise.allSettled([
+  saveMockFlag && saveMock(),
+  writeFile("~lastsync", syncTime),
+])
