@@ -348,7 +348,7 @@ const fileIds = new Map()
 for (const {
   type,
   title,
-  pageid,
+  pageid, // eslint-disable-line no-unused-vars
   minor,
   logtype,
   logaction,
