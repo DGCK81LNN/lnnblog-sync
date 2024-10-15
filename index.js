@@ -6,7 +6,7 @@ import { ProxyAgent } from "proxy-agent"
 import { CookieJar } from "tough-cookie"
 
 import { readFile, writeFile } from "fs/promises"
-import { inspect } from "util"
+import { inspect, promisify } from "util"
 
 const sourceApiPhp = process.env["SOURCE_APIPHP"]
 const sourceUsername = process.env["SOURCE_USERNAME"]
@@ -18,6 +18,7 @@ const lastSync =
   process.env["LAST_SYNC"] || (await readFile("~lastsync", "utf8")).trim()
 const mockLogin = "MOCK_LOGIN" in process.env
 const saveMockFlag = "SAVE_MOCK" in process.env
+const sourceManualFlag = "SOURCE_MANUAL" in process.env
 
 if (!sourceApiPhp) throw new Error("SOURCE_APIPHP not specified")
 if (!targetApiPhp) throw new Error("TARGET_APIPHP not specified")
@@ -83,6 +84,60 @@ const ax = new Proxy(axi, {
   },
 })
 
+/** @type {import("copy-paste")} */
+let _copyPaste
+/** @type {(content: any) => Promise<void>} */
+let copy
+/** @type {() => Promise<string>} */
+let paste
+/** @type {import("readline/promises").Interface} */
+let rl
+
+/** @typedef {{ url?: string; method?: string; params?: Record<string, string>; headers?: Record<string, string>; body?: any }} AxManualConfig */
+/** @type {{ <T>(url: string, config?: AxManualConfig) => Promise<{ data: T }>; <T>(config: AxManualConfig) => Promise<{ data: T }> }} */
+const axManual = async (url, config) => {
+  if (typeof url !== "string") {
+    config = url
+    url = config.url
+  }
+  if (config?.params) {
+    const urlObj = new URL(url)
+    for (const [key, value] of Object.entries(config.params))
+      urlObj.searchParams.set(key, value)
+    url = urlObj.toString()
+  }
+  /** @type {RequestInit} */
+  const opt = {
+    method: config?.method,
+    headers: config?.headers,
+    body: config?.data && JSON.stringify(config.data),
+  }
+  if (config?.data) opt.headers["Content-Type"] ||= "application/json"
+  const fetchArgs = [JSON.stringify(url), JSON.stringify(opt)]
+  if (fetchArgs[1] === "{}") fetchArgs.pop()
+  const code = `await fetch(${fetchArgs.join(",")}).then(r=>r.text())`
+
+  if (!_copyPaste) {
+    _copyPaste = await import("copy-paste")
+    ;[copy, paste] = [_copyPaste.copy, _copyPaste.paste].map(promisify)
+  }
+
+  await copy(code)
+  console.log(
+    "Fetch code copied to clipboard; run it in the browser, " +
+      "then right click the result and select 'Copy string contents'."
+  )
+  rl ??= (await import("readline/promises")).createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  })
+  const response =
+    (await rl.question(
+      "Paste response (or just press Enter to auto paste): "
+    )) || (await paste())
+  return { data: JSON.parse(response) }
+}
+
 /**
  * Set `opt._mock` to a non-empty string to cache the result;
  * set to the empty string to mark the API call as a data-modifying action
@@ -112,9 +167,10 @@ async function api(url, opt, assertion) {
   )
   if (typeof opt?._mock === "string" && Object.hasOwn(mock, opt._mock))
     return Promise.resolve(mock[opt._mock])
+  const axios = opt?._mock !== "" && sourceManualFlag ? axManual : ax
   try {
     /** @type {R} */
-    const resp = await ax(url, {
+    const resp = await axios(url, {
       ...opt,
       params: {
         format: "json",

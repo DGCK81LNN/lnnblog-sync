@@ -113,6 +113,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/copy-paste@npm:^1.1.33":
+  version: 1.1.33
+  resolution: "@types/copy-paste@npm:1.1.33"
+  checksum: 10c0/cbd29830d6e48e6b716a44bd84477faff62a260e426ed9302aa5f187fa4fc62e36c69741899f09e5a7389776c9e96d04656caf6fde76dea37880297666bc0013
+  languageName: node
+  linkType: hard
+
 "acorn-jsx@npm:^5.3.2":
   version: 5.3.2
   resolution: "acorn-jsx@npm:5.3.2"
@@ -272,6 +279,15 @@ __metadata:
   version: 0.0.1
   resolution: "concat-map@npm:0.0.1"
   checksum: 10c0/c996b1cfdf95b6c90fee4dae37e332c8b6eb7d106430c17d538034c0ad9a1630cb194d2ab37293b1bdd4d779494beee7786d586a50bd9376fd6f7bcc2bd4c98f
+  languageName: node
+  linkType: hard
+
+"copy-paste@npm:^1.5.3":
+  version: 1.5.3
+  resolution: "copy-paste@npm:1.5.3"
+  dependencies:
+    iconv-lite: "npm:^0.4.8"
+  checksum: 10c0/28f17ab6460a9342d7b41778ceb48912219e3a3394d47397b1eca6dc7516c8877ef370667bf05df309257192efa1799920706d343a32ee3e8ce3139de2326926
   languageName: node
   linkType: hard
 
@@ -665,6 +681,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"iconv-lite@npm:^0.4.8":
+  version: 0.4.24
+  resolution: "iconv-lite@npm:0.4.24"
+  dependencies:
+    safer-buffer: "npm:>= 2.1.2 < 3"
+  checksum: 10c0/c6886a24cc00f2a059767440ec1bc00d334a89f250db8e0f7feb4961c8727118457e27c495ba94d082e51d3baca378726cd110aaf7ded8b9bbfd6a44760cf1d4
+  languageName: node
+  linkType: hard
+
 "ignore@npm:^5.2.0":
   version: 5.3.1
   resolution: "ignore@npm:5.3.1"
@@ -805,7 +830,9 @@ __metadata:
   resolution: "lnnblog-sync@workspace:."
   dependencies:
     "@eslint/js": "npm:^9.4.0"
+    "@types/copy-paste": "npm:^1.1.33"
     axios: "npm:^1.7.2"
+    copy-paste: "npm:^1.5.3"
     dotenv: "npm:^16.4.5"
     eslint: "npm:9.x"
     globals: "npm:^15.4.0"
@@ -1050,6 +1077,13 @@ __metadata:
   dependencies:
     queue-microtask: "npm:^1.2.2"
   checksum: 10c0/200b5ab25b5b8b7113f9901bfe3afc347e19bb7475b267d55ad0eb86a62a46d77510cb0f232507c9e5d497ebda569a08a9867d0d14f57a82ad5564d991588b39
+  languageName: node
+  linkType: hard
+
+"safer-buffer@npm:>= 2.1.2 < 3":
+  version: 2.1.2
+  resolution: "safer-buffer@npm:2.1.2"
+  checksum: 10c0/7e3c8b2e88a1841c9671094bbaeebd94448111dd90a81a1f606f3f67708a6ec57763b3b47f06da09fc6054193e0e6709e77325415dc8422b04497a8070fa02d4
   languageName: node
   linkType: hard
 
