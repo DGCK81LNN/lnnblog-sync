@@ -167,7 +167,7 @@ async function api(url, opt, assertion) {
   )
   if (typeof opt?._mock === "string" && Object.hasOwn(mock, opt._mock))
     return Promise.resolve(mock[opt._mock])
-  const axios = opt?._mock !== "" && sourceManualFlag ? axManual : ax
+  const axios = opt?._mock && sourceManualFlag ? axManual : ax
   try {
     /** @type {R} */
     const resp = await axios(url, {
@@ -548,6 +548,8 @@ if (xmlExport) {
       .catch(console.error)
   }
 }*/
+
+rl?.close()
 
 "REPL" in process.env &&
   Object.assign((await import("repl")).start().context, {
